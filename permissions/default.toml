@@ -4,4 +4,6 @@
 description = "Default permissions for fors-camera"
 permissions = [
   "allow-take-photo",
+  "allow-check-permissions",
+  "allow-request-permissions",
 ]

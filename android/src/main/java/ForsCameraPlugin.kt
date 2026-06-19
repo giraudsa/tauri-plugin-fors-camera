@@ -1,17 +1,20 @@
 package app.fors.camera
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
+import android.provider.MediaStore
 import android.util.Base64
-import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.ActivityResult
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
@@ -39,39 +42,9 @@ class TakePhotoArgs {
         )
     ]
 )
-class ForsCameraPlugin(activity: ComponentActivity) : Plugin(activity) {
-    private val componentActivity = activity
-    private var pendingInvoke: Invoke? = null
+class ForsCameraPlugin(private val activity: Activity) : Plugin(activity) {
     private var pendingArgs: TakePhotoArgs? = null
     private var photoUri: Uri? = null
-
-    private val takePicture = componentActivity.registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val invoke = pendingInvoke
-        val args = pendingArgs
-        pendingInvoke = null
-        pendingArgs = null
-        val uri = photoUri
-        photoUri = null
-        if (invoke == null || args == null) return@registerForActivityResult
-        if (!success || uri == null) {
-            invoke.reject("No Image Selected")
-            return@registerForActivityResult
-        }
-        resolveUri(invoke, args, uri)
-    }
-
-    private val pickImage = componentActivity.registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        val invoke = pendingInvoke
-        val args = pendingArgs
-        pendingInvoke = null
-        pendingArgs = null
-        if (invoke == null || args == null) return@registerForActivityResult
-        if (uri == null) {
-            invoke.reject("No Image Selected")
-            return@registerForActivityResult
-        }
-        resolveUri(invoke, args, uri)
-    }
 
     private fun resolveBitmap(invoke: Invoke, args: TakePhotoArgs, original: Bitmap) {
         try {
@@ -112,7 +85,7 @@ class ForsCameraPlugin(activity: ComponentActivity) : Plugin(activity) {
     }
 
     private fun readExifRotationDegrees(uri: Uri): Int {
-        val input = componentActivity.contentResolver.openInputStream(uri) ?: return 0
+        val input = activity.contentResolver.openInputStream(uri) ?: return 0
         return input.use {
             when (ExifInterface(it).getAttributeInt(
                 ExifInterface.TAG_ORIENTATION,
@@ -127,7 +100,7 @@ class ForsCameraPlugin(activity: ComponentActivity) : Plugin(activity) {
     }
 
     private fun decodeSampledBitmap(uri: Uri, maxWidth: Int, maxHeight: Int): Bitmap {
-        val resolver = componentActivity.contentResolver
+        val resolver = activity.contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
         bounds.inSampleSize = calculateInSampleSize(bounds, maxWidth, maxHeight)
@@ -163,17 +136,58 @@ class ForsCameraPlugin(activity: ComponentActivity) : Plugin(activity) {
     }
 
     private fun launchCapture(invoke: Invoke, args: TakePhotoArgs) {
-        pendingInvoke = invoke
         pendingArgs = args
         if (args.gallery) {
-            pickImage.launch("image/*")
+            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                type = "image/*"
+                addCategory(Intent.CATEGORY_OPENABLE)
+            }
+            startActivityForResult(invoke, intent, "onGalleryResult")
         } else {
-            val file = File(componentActivity.cacheDir, "fors_capture_${System.currentTimeMillis()}.jpg")
-            val authority = "${componentActivity.packageName}.fileprovider"
-            val uri = FileProvider.getUriForFile(componentActivity, authority, file)
+            val file = File(activity.cacheDir, "fors_capture_${System.currentTimeMillis()}.jpg")
+            val authority = "${activity.packageName}.fileprovider"
+            val uri = FileProvider.getUriForFile(activity, authority, file)
             photoUri = uri
-            takePicture.launch(uri)
+            val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+            startActivityForResult(invoke, intent, "onCameraResult")
         }
+    }
+
+    @ActivityCallback
+    private fun onCameraResult(invoke: Invoke, result: ActivityResult) {
+        val args = pendingArgs
+        val uri = photoUri
+        pendingArgs = null
+        photoUri = null
+        if (args == null) {
+            invoke.reject("takePhoto args missing")
+            return
+        }
+        if (result.resultCode != Activity.RESULT_OK || uri == null) {
+            invoke.reject("No Image Selected")
+            return
+        }
+        resolveUri(invoke, args, uri)
+    }
+
+    @ActivityCallback
+    private fun onGalleryResult(invoke: Invoke, result: ActivityResult) {
+        val args = pendingArgs
+        pendingArgs = null
+        photoUri = null
+        if (args == null) {
+            invoke.reject("takePhoto args missing")
+            return
+        }
+        val uri = result.data?.data
+        if (result.resultCode != Activity.RESULT_OK || uri == null) {
+            invoke.reject("No Image Selected")
+            return
+        }
+        resolveUri(invoke, args, uri)
     }
 
     @PermissionCallback
@@ -183,10 +197,9 @@ class ForsCameraPlugin(activity: ComponentActivity) : Plugin(activity) {
             invoke.reject("takePhoto args missing")
             return
         }
-        if (ContextCompat.checkSelfPermission(componentActivity, Manifest.permission.CAMERA)
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            pendingInvoke = null
             pendingArgs = null
             invoke.reject("CAMERA permission denied")
             return
@@ -199,7 +212,7 @@ class ForsCameraPlugin(activity: ComponentActivity) : Plugin(activity) {
         try {
             val args = invoke.parseArgs(TakePhotoArgs::class.java)
             if (!args.gallery &&
-                ContextCompat.checkSelfPermission(componentActivity, Manifest.permission.CAMERA)
+                ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA)
                 != PackageManager.PERMISSION_GRANTED
             ) {
                 pendingArgs = args
@@ -208,8 +221,8 @@ class ForsCameraPlugin(activity: ComponentActivity) : Plugin(activity) {
             }
             launchCapture(invoke, args)
         } catch (ex: Exception) {
-            pendingInvoke = null
             pendingArgs = null
+            photoUri = null
             invoke.reject(ex.message ?: "takePhoto error")
         }
     }
