@@ -43,10 +43,12 @@ The host app must declare a `FileProvider` with authority `${applicationId}.file
 import { invoke } from '@tauri-apps/api/core';
 
 const photo = await invoke('plugin:fors-camera|take_photo', {
-  gallery: false,
-  quality: 90,
-  targetWidth: 1440,
-  targetHeight: 1440,
+  args: {
+    gallery: false,
+    quality: 90,
+    targetWidth: 1440,
+    targetHeight: 1440,
+  },
 });
 // photo: { data, name, mimeType }
 ```
